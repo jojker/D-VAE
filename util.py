@@ -93,10 +93,62 @@ def load_ENAS_graphs(name, n_types=6, fmt='igraph', rand_seed=0, with_y=True, bu
     return g_list[:int(ng*0.9)], g_list[int(ng*0.9):], graph_args
 
 
-def one_hot(idx, length):
-    idx = torch.LongTensor([idx]).unsqueeze(0)
-    x = torch.zeros((1, length)).scatter_(1, idx, 1)
+def load_3D_graphs(name, n_types=6, fmt='igraph', rand_seed=0, with_y=False, burn_in=0):
+    # load 3D scene graph format NNs to igraphs or tensors
+    g_list = []
+    max_n = 0  # maximum number of nodes
+    with open('data/%s.txt' % name, 'r') as f:
+        for i, row in enumerate(tqdm(f)):
+            if i < burn_in:
+                continue
+            if row is None:
+                break
+            if with_y:
+                row, y = eval(row)
+            else:
+                row = eval(row)
+                y = 0.0
+            g, n = decode_3D_to_igraph(row)
+            max_n = max(max_n, n)
+            g_list.append((g, y)) 
+    graph_args.num_vertex_type = n_types + 2  # original types + start/end types
+    graph_args.max_n = max_n  # maximum number of nodes
+    graph_args.START_TYPE = 0  # predefined start vertex type
+    graph_args.END_TYPE = 1 # predefined end vertex type
+    ng = len(g_list)
+    print('# node types: %d' % graph_args.num_vertex_type)
+    print('maximum # nodes: %d' % graph_args.max_n)
+    random.Random(rand_seed).shuffle(g_list)
+    return g_list[:int(ng*0.9)], g_list[int(ng*0.9):], graph_args
+
+
+# # modified below to allow seed values
+# def one_hot(idx, length): 
+#     idx = torch.LongTensor([idx]).unsqueeze(0)
+#     x = torch.zeros((1, length)).scatter_(1, idx, 1)
+#     return x
+
+
+def one_hot(idx, length, seed=None):
+    if type(idx) in [list, range]:
+        if idx == []:
+            return None
+        idx = torch.LongTensor(idx).unsqueeze(0).t()
+        if seed is None:
+            seed=torch.ones(idx.shape,dtype=idx.dtype)
+        else:
+            seed = torch.Tensor(seed).unsqueeze(0).t()
+        x = torch.zeros((len(idx), length)).scatter_(1, idx, seed)
+    else:
+        idx = torch.LongTensor([idx]).unsqueeze(0)
+        if seed is None:
+            seed=torch.ones(idx.shape,dtype=idx.dtype)
+        else:
+            seed = torch.Tensor([1.]).unsqueeze(0)
+        x = torch.zeros((1, length)).scatter_(1, idx, seed)
     return x
+
+
 
 
 def decode_ENAS_to_tensor(row, n_types):
@@ -134,7 +186,7 @@ def decode_ENAS_to_igraph(row):
     g.vs[0]['type'] = 0  # input node
     for i, node in enumerate(row):
         g.vs[i+1]['type'] = node[0] + 2  # assign 2, 3, ... to other types
-        g.add_edge(i, i+1)  # always connect from last node
+        g.add_edge(i, i+1)  # always connect from last node (JKJ edit, this is a problem, I need multiple parallel paths)
         for j, edge in enumerate(node[1:]):
             if edge == 1:
                 g.add_edge(j, i+1)
@@ -144,10 +196,46 @@ def decode_ENAS_to_igraph(row):
     return g, n+2
 
 
+def decode_3D_to_igraph(row):
+    if type(row) == str:
+        row = eval(row)  # convert string to list of lists
+    n = len(row)
+    g = igraph.Graph(directed=True)
+    g.add_vertices(n+2)
+    g.vs[0]['type'] = 0  # input node
+    for i, node in enumerate(row):
+        g.vs[i+1]['type'] = node[0] + 2  # assign 2, 3, ... to other types
+        if sum(node[1:]) == 0:  # if no connections from previous nodes, connect from input
+            g.add_edge(0, i+1,seed=1.)
+        else:
+            for j, edge in enumerate(node[1:]):
+                if edge != 0:
+                    g.add_edge(j+1, i+1,seed=float(edge))
+    g.vs[n+1]['type'] = 1  # output node
+    end_vertices = [v.index for v in g.vs.select(_outdegree_eq=0) if v.index != n+1]
+    for j in end_vertices:  # connect all loose-end vertices to the output node
+        g.add_edge(j, n+1,seed=1.)
+    return g, n+2
+
+
 def flat_ENAS_to_nested(row, n_nodes):
     # transform a flattened ENAS string to a nested list of ints
     if type(row) == str:
         row = [int(x) for x in row.split()]
+    cnt = 0
+    res = []
+    for i in range(1, n_nodes+1):
+        res.append(row[cnt:cnt+i])
+        cnt += i
+        if cnt == len(row):
+            break
+    return res
+
+
+def flat_3D_to_nested(row, n_nodes):
+    # transform a flattened 3D scene string to a nested list of ints
+    if type(row) == str:
+        row = [float(x) for x in row.split()]
     cnt = 0
     res = []
     for i in range(1, n_nodes+1):
@@ -171,6 +259,24 @@ def decode_igraph_to_ENAS(g):
                 row[j] = 1
         res += row
     return ' '.join(str(x) for x in res)
+
+
+
+def decode_igraph_to_3D(g):
+    # decode an igraph to a flattend 3D scene string
+    n = g.vcount()
+    row = []
+    adjlist = g.get_adjlist(igraph.IN)
+    edgeList=g.get_edgelist()
+    seedList=g.es['seed']
+    for i in range(1, n-1):
+        node = [int(g.vs[i]['type'])-2]
+        node = node + [0] * (i-1)
+        edgeList=[e for e in g.vs[i].all_edges() if e.target == i]
+        for e in edgeList:
+            node[e.source] = e['seed'] # we do not need to shift by 1 because of the type code
+        row.append(node)
+    return '[' + ', '.join(str(x) for x in row) + ']'
 
 '''
 # some code to test format transformations
@@ -327,6 +433,13 @@ def decode_from_latent_space(
                         if return_igraph:
                             str2igraph[cur] = arc
                         valid_arcs[i].append(cur)
+            elif data_type == '3D':
+                if is_valid_3D(arc, model.START_TYPE, model.END_TYPE):
+                    if not check_n_nodes or check_n_nodes and arc.vcount() == n_nodes:
+                        cur = decode_igraph_to_3D(arc)  # a flat 3D scene string
+                        if return_igraph:
+                            str2igraph[cur] = arc
+                        valid_arcs[i].append(cur)
             elif data_type == 'BN':  
                 if is_valid_BN(arc, model.START_TYPE, model.END_TYPE, nvt=model.nvt):
                     cur = decode_igraph_to_BN_adj(arc)  # a flat BN adjacency matrix string
@@ -364,6 +477,8 @@ def plot_DAG(g, res_dir, name, backbone=False, data_type='ENAS', pdf=False):
         file_name = os.path.join(res_dir, name+'.pdf')
     if data_type == 'ENAS':
         draw_network(g, file_name, backbone)
+    elif data_type == '3D':
+        draw_3DRep(g, file_name, backbone)
     elif data_type == 'BN':
         draw_BN(g, file_name)
     return file_name
@@ -382,6 +497,30 @@ def draw_network(g, path, backbone=False):
         for node in g.get_adjlist(igraph.IN)[idx]:
             if node == idx-1 and backbone:
                 graph.add_edge(node, idx, weight=1)
+            else:
+                graph.add_edge(node, idx, weight=0)
+    graph.layout(prog='dot')
+    graph.draw(path)
+
+def draw_3DRep(g, path, backbone=False):
+    graph = pgv.AGraph(directed=True, strict=True, fontname='Helvetica', arrowtype='open')
+    if g is None:
+        add_node(graph, 0, 0)
+        graph.layout(prog='dot')
+        graph.draw(path)
+        return
+    for idx in range(g.vcount()):
+        add_node(graph, idx, g.vs[idx]['type'])
+    adjlist = g.get_adjlist(igraph.IN)
+    edgeList=g.get_edgelist()
+    seedList=g.es['seed']
+    for idx in range(g.vcount()):
+        for node in adjlist[idx]:
+            currentEdge = (node,idx)
+            edgeNdx = edgeList.index(currentEdge)
+            currentSeed = seedList[edgeNdx];
+            if node == idx-1 and backbone:
+                graph.add_edge(node, idx, weight=currentSeed)
             else:
                 graph.add_edge(node, idx, weight=0)
     graph.layout(prog='dot')
@@ -518,6 +657,19 @@ def is_valid_ENAS(g, START_TYPE=0, END_TYPE=1):
             return res
     # the output node n must not have edges other than from n-1
     res = res and (g.vs[g.vcount()-1].indegree() == 1)
+    return res
+
+def is_valid_3D(g, START_TYPE=0, END_TYPE=1):
+    # first need to be a valid DAG computation graph
+    res = is_valid_DAG(g, START_TYPE, END_TYPE)
+    # TODO only property->shape or shape->shape connections are allowed
+    # # in addition, node i must connect to node i+1
+    # for i in range(g.vcount()-2):
+    #     res = res and g.are_connected(i, i+1)
+    #     if not res:
+    #         return res
+    # # the output node n must not have edges other than from n-1
+    # res = res and (g.vs[g.vcount()-1].indegree() == 1)
     return res
     
 

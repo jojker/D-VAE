@@ -1,0 +1,1 @@
+python C:\Users\cellp\OneDrive\MiscComputation\D-VAE\train.py

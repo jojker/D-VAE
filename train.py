@@ -81,6 +81,52 @@ parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
 
 args = parser.parse_args()
+
+""" JKJ edit 06/21/2021 make compatible with debuggers """
+if False:
+    args.data_name='asia_200k'
+    args.data_type='BN' 
+    args.nvt=8 
+    args.save_interval=50 
+    args.save_appendix='_DVAE'
+    args.epochs=100 
+    args.lr= 1e-4 
+    args.model= 'DVAE_BN'
+    args.nz= 56 
+    args.batch_size= 128
+
+elif False:
+    args.data_name = 'final_structures6'
+    args.data_type='3D' 
+    args.save_interval = 100 
+    args.save_appendix = '_DVAE_3D' 
+    args.epochs = 300 
+    args.lr = 1e-4 
+    args.model = 'DVAE_3D'
+    args.bidirectional = True
+    args.nz = 56 
+    args.batch_size = 32
+
+elif True:
+    args.data_name = 'Test3DGraphs'
+    args.data_type='3D' 
+    args.nvt=8 
+    args.save_interval = 100 
+    args.save_appendix = '_DVAE_3D' 
+    args.epochs = 300 
+    args.lr = 1e-4 
+    args.model = 'DVAE_3D'
+    args.bidirectional = True
+    args.nz = 84 
+    args.batch_size = 32
+    args.reprocess = True
+        
+
+
+
+
+
+
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 torch.manual_seed(args.seed)
 if args.cuda:
@@ -116,6 +162,10 @@ else:
     if args.data_type == 'ENAS':
         train_data, test_data, graph_args = load_ENAS_graphs(args.data_name, n_types=args.nvt,
                                                              fmt=input_fmt)
+    elif args.data_type == '3D':
+        train_data, test_data, graph_args = load_3D_graphs(args.data_name, n_types=args.nvt,
+                                                             fmt=input_fmt)
+        
     elif args.data_type == 'BN':
         train_data, test_data, graph_args = load_BN_graphs(args.data_name, n_types=args.nvt,
                                                            fmt=input_fmt)
@@ -362,6 +412,11 @@ def prior_validity(scale_to_train_range=False):
                         if is_valid_ENAS(g, graph_args.START_TYPE, graph_args.END_TYPE):
                             n_valid += 1
                             G_valid.append(g)
+                elif args.data_type == '3D':
+                    for g in g_batch:
+                        if is_valid_3D(g, graph_args.START_TYPE, graph_args.END_TYPE):
+                            n_valid += 1
+                            G_valid.append(g)
                 elif args.data_type == 'BN':
                     for g in g_batch:
                         if is_valid_BN(g, graph_args.START_TYPE, graph_args.END_TYPE):
@@ -370,8 +425,10 @@ def prior_validity(scale_to_train_range=False):
             cnt = 0
     r_valid = n_valid / (n_latent_points * decode_times)
     print('Ratio of valid decodings from the prior: {:.4f}'.format(r_valid))
-
-    G_valid_str = [decode_igraph_to_ENAS(g) for g in G_valid]
+    if args.data_type == '3D':
+        G_valid_str = [decode_igraph_to_3D(g) for g in G_valid]
+    else:
+        G_valid_str = [decode_igraph_to_ENAS(g) for g in G_valid]
     r_unique = len(set(G_valid_str)) / len(G_valid_str) if len(G_valid_str)!=0 else 0.0
     print('Ratio of unique decodings from the prior: {:.4f}'.format(r_unique))
 
@@ -486,7 +543,7 @@ def interpolation_exp(epoch, num=5):
 
 
 def interpolation_exp2(epoch):
-    if args.data_type != 'ENAS':
+    if args.data_type not in ['3D','ENAS']:
         return
     print('Interpolation experiments between flat-net and dense-net')
     interpolation_res_dir = os.path.join(args.res_dir, 'interpolation2')
@@ -506,8 +563,12 @@ def interpolation_exp2(epoch):
         g0 = model._collate_fn([g0])
         g1 = model._collate_fn([g1])
     elif args.model.startswith('DVAE'):
-        g0, _ = decode_ENAS_to_igraph(str(g0))
-        g1, _ = decode_ENAS_to_igraph(str(g1))
+        if args.data_type=='ENAS':
+            g0, _ = decode_ENAS_to_igraph(str(g0))
+            g1, _ = decode_ENAS_to_igraph(str(g1))
+        else:
+            g0, _ = decode_3D_to_igraph(str(g0))
+            g1, _ = decode_3D_to_igraph(str(g1))
     z0, _ = model.encode(g0)
     z1, _ = model.encode(g1)
     print('norm of z0: {}, norm of z1: {}'.format(torch.norm(z0), torch.norm(z1)))
@@ -537,7 +598,7 @@ def interpolation_exp2(epoch):
 
 
 def interpolation_exp3(epoch):
-    if args.data_type != 'ENAS':
+    if args.data_type not in ['3D','ENAS']:
         return
     print('Interpolation experiments around a great circle')
     interpolation_res_dir = os.path.join(args.res_dir, 'interpolation3')
@@ -552,7 +613,10 @@ def interpolation_exp3(epoch):
         g0 = g0.to(device)
         g0 = model._collate_fn([g0])
     elif args.model.startswith('DVAE'):
-        g0, _ = decode_ENAS_to_igraph(str(g0))
+        if args.data_type=='ENAS':
+            g0, _ = decode_ENAS_to_igraph(str(g0))
+        else:
+            g0, _ = decode_3D_to_igraph(str(g0))
     z0, _ = model.encode(g0)
     norm0 = torch.norm(z0)
     z1 = torch.ones_like(z0)
@@ -605,6 +669,11 @@ def smoothness_exp(epoch, gap=0.05):
             g0 = model._collate_fn([g0])
         elif args.model.startswith('DVAE'):
             g0, _ = decode_ENAS_to_igraph(row)
+    elif args.data_type == '3D': 
+        g_str = '4 4 0 3 0 0 5 0 0 0.3 2 0 0 0 0 5 0 0 0 0.1 0'  # a 6-layer network
+        row = [int(x) for x in g_str.split()]
+        row = flat_3D_to_nested(row, model.max_n-2)
+        g0, _ = decode_3D_to_igraph(row)
     elif args.data_type == 'BN':
         g0 = train_data[20][0]
         if args.model.startswith('SVAE'):
@@ -646,10 +715,10 @@ def smoothness_exp(epoch, gap=0.05):
         nameij = plot_DAG(G[idx], smoothness_res_dir, nameij, data_type=args.data_type)
         names.append(nameij)
     #fig = plt.figure(figsize=(200, 200))
-    if args.data_type == 'ENAS':
-        fig = plt.figure(figsize=(50, 50))
-    elif args.data_type == 'BN':
+    if args.data_type == 'BN':
         fig = plt.figure(figsize=(30, 30))
+    else:
+        fig = plt.figure(figsize=(50, 50))
     
     nrow, ncol = grid_size, grid_size
     for ij, nameij in enumerate(names):
